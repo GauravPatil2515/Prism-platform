@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from starlette.background import BackgroundTask
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
@@ -141,6 +142,9 @@ MAX_STORED_SCANS = int(os.getenv("MAX_STORED_SCANS") or "200")
 
 _SCANS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scan_data")
 os.makedirs(_SCANS_DIR, exist_ok=True)
+
+_RESULTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
+os.makedirs(_RESULTS_DIR, exist_ok=True)
 
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "module_cache")
 os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -698,9 +702,6 @@ async def _execute_scan(scan_id: str, target: str, scan_type: str, modules: list
         graph = build_graph(target, scan_type, results)
         results["graph"] = graph
 
-        report_path = generate_html_report(target, scan_type, results, opsec)
-        results["report_path"] = report_path
-
         _scans[scan_id].update(
             {
                 "status": "completed",
@@ -1073,11 +1074,11 @@ async def download_report(request: Request, scan_id: str, lang: str = "en"):
         None,
         lambda: generate_html_report(scan["target"], scan["scan_type"], results, opsec, lang=lang),
     )
-    scan["results"]["report_path"] = report_path
     return FileResponse(
         report_path,
         media_type="text/html",
         filename=os.path.basename(report_path),
+        background=BackgroundTask(os.remove, report_path),
     )
 
 @app.get("/api/scan/{scan_id}/report/pdf", dependencies=[Depends(require_api_key)])
@@ -1104,6 +1105,7 @@ async def download_report_pdf(request: Request, scan_id: str, lang: str = "en"):
         pdf_path,
         media_type="application/pdf",
         filename=os.path.basename(pdf_path),
+        background=BackgroundTask(os.remove, pdf_path),
     )
 
 @app.post("/api/url-scan", dependencies=[Depends(require_api_key)])
@@ -1463,6 +1465,15 @@ async def clear_scans(request: Request):
                 deleted += 1
             except Exception:
                 pass
+
+        if os.path.exists(_RESULTS_DIR):
+            for rname in os.listdir(_RESULTS_DIR):
+                if rname.startswith("report_") and (rname.endswith(".html") or rname.endswith(".pdf")):
+                    rpath = os.path.join(_RESULTS_DIR, rname)
+                    try:
+                        os.remove(rpath)
+                    except Exception:
+                        pass
 
         return deleted
 
